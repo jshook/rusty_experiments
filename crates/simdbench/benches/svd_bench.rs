@@ -2,7 +2,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use simdbench::distance;
-use simdbench::svd;
+use simdbench::svd2x2;
 use simsimd::SpatialSimilarity;
 
 fn bench_svd(c: &mut Criterion) {
@@ -10,10 +10,10 @@ fn bench_svd(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("svd_2x2");
     group.bench_function("inline_asm_sse2", |b| {
-        b.iter(|| svd::svd_2x2_simd(black_box(&m)))
+        b.iter(|| svd2x2::svd_2x2_simd(black_box(&m)))
     });
     group.bench_function("pure_scalar", |b| {
-        b.iter(|| svd::svd_2x2_scalar(black_box(&m)))
+        b.iter(|| svd2x2::svd_2x2_scalar(black_box(&m)))
     });
     group.finish();
 }

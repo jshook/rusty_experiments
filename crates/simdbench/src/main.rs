@@ -2,7 +2,7 @@
 
 use std::f64::consts::PI;
 
-use simdbench::svd::{svd_2x2_simd, svd_2x2_scalar, Svd2x2};
+use simdbench::svd2x2::{svd_2x2_simd, svd_2x2_scalar, Svd2x2};
 
 fn mat2_mul(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
     [
