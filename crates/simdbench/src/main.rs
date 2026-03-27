@@ -22,7 +22,12 @@ fn verify_svd(m: &[f64; 4], svd: &Svd2x2) -> f64 {
 }
 
 fn main() {
-    println!("=== 2x2 SVD via inline SSE2 assembly ===\n");
+    #[cfg(target_arch = "aarch64")]
+    let isa_label = "NEON";
+    #[cfg(target_arch = "x86_64")]
+    let isa_label = "SSE2";
+
+    println!("=== 2x2 SVD via inline {} assembly ===\n", isa_label);
 
     let matrices: Vec<(&str, [f64; 4])> = vec![
         ("Symmetric", [3.0, 2.0, 2.0, 3.0]),
@@ -41,16 +46,29 @@ fn main() {
             name, svd.s[0], svd.s[1], verify_svd(m, &svd), svd_s.s[0], svd_s.s[1]);
     }
 
-    // Distance function comparison: AVX-512 asm vs simsimd vs scalar
-    println!("\n=== Vector distance: AVX-512 asm vs simsimd vs scalar ===\n");
     use simdbench::distance::*;
     use simsimd::SpatialSimilarity;
 
     let a: Vec<f32> = (0..256).map(|i| i as f32).collect();
     let b: Vec<f32> = (0..256).map(|i| (255 - i) as f32).collect();
 
+    println!("\n=== Vector distance: asm vs simsimd vs scalar ===\n");
     println!("  Vectors: a=[0..255], b=[255..0], len=256\n");
 
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        println!("  dot:  sve={:.1}  neon={:.1}  simsimd={:?}  scalar={:.1}",
+            dot_f32_sve(&a, &b), dot_f32_neon(&a, &b),
+            <f32 as SpatialSimilarity>::dot(&a, &b), dot_f32_scalar(&a, &b));
+        println!("  cos:  sve={:.6}  neon={:.6}  simsimd={:?}  scalar={:.6}",
+            cosine_f32_sve(&a, &b), cosine_f32_neon(&a, &b),
+            <f32 as SpatialSimilarity>::cos(&a, &b), cosine_f32_scalar(&a, &b));
+        println!("  l2sq: sve={:.1}  neon={:.1}  simsimd={:?}  scalar={:.1}",
+            sqeuclidean_f32_sve(&a, &b), sqeuclidean_f32_neon(&a, &b),
+            <f32 as SpatialSimilarity>::l2sq(&a, &b), sqeuclidean_f32_scalar(&a, &b));
+    }
+
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         println!("  dot:  avx512={:.1}  avx={:.1}  simsimd={:?}  scalar={:.1}",
             dot_f32_avx512(&a, &b), dot_f32_avx(&a, &b),

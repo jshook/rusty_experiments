@@ -164,6 +164,141 @@ pub fn svd_2x2_simd(m: &[f64; 4]) -> Svd2x2 {
     Svd2x2 { u, s, vt }
 }
 
+/// Compute the 2x2 SVD using inline assembly with NEON SIMD instructions.
+///
+/// Same closed-form algorithm as the SSE2 version, using AArch64 AdvSIMD
+/// for the paired arithmetic (FADD/FSUB/FMUL on 2×f64 vectors).
+#[cfg(target_arch = "aarch64")]
+pub fn svd_2x2_simd(m: &[f64; 4]) -> Svd2x2 {
+    let mut e: f64 = 0.0;
+    let mut f: f64 = 0.0;
+    let mut g: f64 = 0.0;
+    let mut h: f64 = 0.0;
+
+    // Step 1: Compute E, F, G, H using NEON packed double operations.
+    unsafe {
+        asm!(
+            // Load m00, m10 (non-contiguous) into v0 = [m00, m10]
+            "ldr d0, [{src}]",        // m00
+            "ld1 {{v0.d}}[1], [{src_m10}]",  // m10
+            // Load m11, m01 into v1 = [m11, m01]
+            "ldr d1, [{src_m11}]",    // m11
+            "ld1 {{v1.d}}[1], [{src_m01}]",  // m01
+            // v2 = [m00+m11, m10+m01] = [2E, 2G]
+            "fadd v2.2d, v0.2d, v1.2d",
+            // v0 = [m00-m11, m10-m01] = [2F, 2H]
+            "fsub v0.2d, v0.2d, v1.2d",
+            // Multiply by 0.5
+            "fmov d1, #0.5",
+            "dup  v1.2d, v1.d[0]",
+            "fmul v2.2d, v2.2d, v1.2d",   // [E, G]
+            "fmul v0.2d, v0.2d, v1.2d",   // [F, H]
+            // Store results
+            "st1 {{v2.d}}[0], [{out_e}]",
+            "st1 {{v2.d}}[1], [{out_g}]",
+            "st1 {{v0.d}}[0], [{out_f}]",
+            "st1 {{v0.d}}[1], [{out_h}]",
+            src = in(reg) m.as_ptr(),
+            src_m10 = in(reg) &m[2] as *const f64,
+            src_m11 = in(reg) &m[3] as *const f64,
+            src_m01 = in(reg) &m[1] as *const f64,
+            out_e = in(reg) &mut e as *mut f64,
+            out_f = in(reg) &mut f as *mut f64,
+            out_g = in(reg) &mut g as *mut f64,
+            out_h = in(reg) &mut h as *mut f64,
+            out("v0") _, out("v1") _, out("v2") _,
+            options(nostack),
+        );
+    }
+
+    // Step 2: Compute squared magnitudes using NEON.
+    let mut q1: f64 = 0.0; // E^2 + H^2
+    let mut q2: f64 = 0.0; // F^2 + G^2
+
+    unsafe {
+        asm!(
+            // v0 = [E, H]
+            "ldr d0, [{pe}]",
+            "ld1 {{v0.d}}[1], [{ph}]",
+            "fmul v0.2d, v0.2d, v0.2d",   // [E^2, H^2]
+            "faddp d0, v0.2d",             // E^2 + H^2
+            "str d0, [{pq1}]",
+            // v1 = [F, G]
+            "ldr d1, [{pf}]",
+            "ld1 {{v1.d}}[1], [{pg}]",
+            "fmul v1.2d, v1.2d, v1.2d",   // [F^2, G^2]
+            "faddp d1, v1.2d",             // F^2 + G^2
+            "str d1, [{pq2}]",
+            pe = in(reg) &e as *const f64,
+            pf = in(reg) &f as *const f64,
+            pg = in(reg) &g as *const f64,
+            ph = in(reg) &h as *const f64,
+            pq1 = in(reg) &mut q1 as *mut f64,
+            pq2 = in(reg) &mut q2 as *mut f64,
+            out("v0") _, out("v1") _,
+            options(nostack),
+        );
+    }
+
+    let sq1 = q1.sqrt();
+    let sq2 = q2.sqrt();
+    let s1 = sq1 + sq2;
+    let s2 = sq1 - sq2;
+
+    // Step 3: Rotation angles
+    let theta = g.atan2(f);
+    let phi = h.atan2(e);
+    let angle_u = (phi + theta) / 2.0;
+    let angle_v = (phi - theta) / 2.0;
+
+    // Step 4: Build rotation matrices using NEON
+    let (sin_u, cos_u) = angle_u.sin_cos();
+    let (sin_v, cos_v) = angle_v.sin_cos();
+
+    let mut u = [0.0_f64; 4];
+    let mut vt = [0.0_f64; 4];
+
+    unsafe {
+        asm!(
+            // U = [cos_u, -sin_u, sin_u, cos_u]
+            "ldr d0, [{pcos_u}]",
+            "ldr d1, [{psin_u}]",
+            "fneg d2, d1",               // -sin_u
+            "stp d0, d2, [{pu}]",        // u[0]=cos_u, u[1]=-sin_u
+            "stp d1, d0, [{pu}, #16]",   // u[2]=sin_u, u[3]=cos_u
+            // V^T = [cos_v, -sin_v, sin_v, cos_v]
+            "ldr d0, [{pcos_v}]",
+            "ldr d1, [{psin_v}]",
+            "fneg d2, d1",
+            "stp d0, d2, [{pvt}]",
+            "stp d1, d0, [{pvt}, #16]",
+            pcos_u = in(reg) &cos_u as *const f64,
+            psin_u = in(reg) &sin_u as *const f64,
+            pcos_v = in(reg) &cos_v as *const f64,
+            psin_v = in(reg) &sin_v as *const f64,
+            pu = in(reg) u.as_mut_ptr(),
+            pvt = in(reg) vt.as_mut_ptr(),
+            out("v0") _, out("v1") _, out("v2") _,
+            options(nostack),
+        );
+    }
+
+    // Sign fixup
+    let mut s = [s1, s2];
+    if s[0] < 0.0 {
+        s[0] = -s[0];
+        u[0] = -u[0];
+        u[2] = -u[2];
+    }
+    if s[1] < 0.0 {
+        s[1] = -s[1];
+        u[1] = -u[1];
+        u[3] = -u[3];
+    }
+
+    Svd2x2 { u, s, vt }
+}
+
 /// Pure Rust (no inline asm) 2x2 SVD for comparison benchmarking.
 pub fn svd_2x2_scalar(m: &[f64; 4]) -> Svd2x2 {
     let (a, b, c, d) = (m[0], m[1], m[2], m[3]);
